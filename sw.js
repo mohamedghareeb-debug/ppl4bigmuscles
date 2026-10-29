@@ -1,5 +1,5 @@
 // Offline cache. Bump VERSION when shipping changes so phones pick them up.
-const VERSION = 'ppl-v5';
+const VERSION = 'ppl-v7';
 const ASSETS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 

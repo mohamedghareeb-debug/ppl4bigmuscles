@@ -111,8 +111,12 @@ const MUSCLE_MAP = {
   'Hip Adduction': P(['adductors']), 'Hip Abduction': P(['abductors']),
 };
 
+// Exercises done with a pair of dumbbells. They start as weight per dumbbell, the way gym dumbbells are labelled.
+const DB_PAIR = new Set(['Incline Dumbbell Press', 'Dumbbell Fly', 'Dumbbell Bench Press', 'Seated Dumbbell Shoulder Press', 'Lateral Raise',
+  'Hammer Curl', 'Incline Dumbbell Curl', 'Dumbbell Shrug', 'Bulgarian Split Squat', 'Walking Lunge']);
+
 const fromCatalogue = ([day, name, sets, reps, target, inc, rest, kind, inPlan, alt]) =>
-  newExercise({ day, name, sets, reps, target, inc, rest, kind, inPlan: !!inPlan, alt });
+  newExercise({ day, name, sets, reps, target, inc, rest, kind, inPlan: !!inPlan, alt, load: DB_PAIR.has(name) ? 'each' : 'single' });
 
 const ICON = {
   check: '<svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
@@ -135,6 +139,50 @@ const r2 = n => Math.round(n * 100) / 100;
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = n => (Math.round(n * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const kg = n => `${fmt(n || 0)} ${UNIT}`;
+
+/* ---------- units and dumbbell loads ----------
+ * Each exercise stores weights in its own unit ('kg', or 'lb' for machines labelled in pounds) so progression
+ * steps land exactly on what the machine has. Totals across exercises (volume, bodyweight ratios) convert to kg.
+ * load: 'single' (barbell, machine, one dumbbell), 'each' (pair, weight per dumbbell) or 'total' (pair, both added up).
+ * The increment is per dumbbell, so logging totals doubles the jump.
+ */
+const LB = 0.45359237;
+const unitOf = x => (x?.unit === 'lb' ? 'lb' : 'kg');
+const loadOf = x => x?.load || 'single';
+const stepOf = e => (loadOf(e) === 'total' ? e.inc * 2 : e.inc);
+const toKg = (x, w) => (unitOf(x) === 'lb' ? w * LB : w);
+const loadKg = (x, w) => toKg(x, w) * (loadOf(x) === 'each' ? 2 : 1);
+const unitLabel = x => `${unitOf(x)}${loadOf(x) === 'each' ? ' each' : loadOf(x) === 'total' ? ' total' : ''}`;
+const wt = (x, w) => `${fmt(w || 0)} ${unitLabel(x)}`;
+// Unit info for a logged entry: the exercise's current settings, falling back to what the entry recorded.
+const unitSrc = en => byId(en.exId) || en;
+
+// Changes the unit (kg ↔ lb) or dumbbell load (each ↔ total) of an exercise and converts its whole history to match.
+function convertExercise(ex, { unit = unitOf(ex), load = loadOf(ex) }) {
+  let f = 1;
+  if (unit !== unitOf(ex)) f *= unit === 'lb' ? 1 / LB : LB;
+  const pair = l => l === 'each' || l === 'total';
+  if (pair(load) && pair(loadOf(ex)) && load !== loadOf(ex)) f *= load === 'total' ? 2 : 0.5;
+  const q = unit === 'lb' ? 0.5 : 0.25;
+  const c = w => (w == null ? w : Math.round(w * f / q) * q);
+  if (unit !== unitOf(ex)) {
+    // Remember the step used in each unit so switching back and forth returns to it.
+    ex.incs = { ...ex.incs, [unitOf(ex)]: ex.inc };
+    const toLb = { 1: 2.5, 1.25: 2.5, 2: 5, 2.5: 5, 5: 10, 10: 20 }, toKgInc = { 2.5: 1.25, 5: 2.5, 10: 5, 20: 10 };
+    ex.inc = ex.incs[unit] ?? (unit === 'lb' ? (toLb[ex.inc] || Math.max(2.5, Math.round(ex.inc / LB / 2.5) * 2.5))
+      : (toKgInc[ex.inc] || Math.max(0.5, Math.round(ex.inc * LB * 4) / 4)));
+  }
+  ex.weight = c(ex.weight);
+  ex.log.forEach(l => { l.w = c(l.w); });
+  ex.unit = unit;
+  ex.load = load;
+  const fix = en => { if (en.exId === ex.id) { en.weight = c(en.weight); en.unit = unit; en.load = load; en.inc = stepOf(ex); } };
+  state.sessions.forEach(s => {
+    s.entries.forEach(fix);
+    s.outcomes.forEach(o => { if (o.exId === ex.id) { o.from = c(o.from); o.to = c(o.to); } });
+  });
+  state.active?.entries.forEach(fix);
+}
 const dShort = d => new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 const dLong = d => new Date(d).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 const mmss = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -196,7 +244,7 @@ function relDays(d) {
 }
 
 function sessionVolume(s) {
-  return Math.round(s.entries.reduce((t, en) => t + en.sets.reduce((u, st) => u + (st.done ? (Number(st.reps) || 0) * en.weight : 0), 0), 0));
+  return Math.round(s.entries.reduce((t, en) => t + en.sets.reduce((u, st) => u + (st.done ? (Number(st.reps) || 0) * loadKg(unitSrc(en), en.weight) : 0), 0), 0));
 }
 
 const musclesOf = (exId, name) => byId(exId)?.muscles || MUSCLE_MAP[byId(exId)?.name || name] || null;
@@ -243,8 +291,9 @@ function findPRs(session, earlier) {
     const atWeight = before.sets.filter(x => x.w >= en.weight);
     const prevReps = Math.max(0, ...atWeight.map(x => x.reps));
     let text = '';
-    if (now.e1rm > before.e1rm * 1.005) text = `new best estimated max: ~${kg(Math.round(now.e1rm))} (${kg(top.w)} × ${top.reps})`;
-    else if (atWeight.length && bestReps > prevReps) text = `most reps ever at ${kg(en.weight)} or more: ${bestReps}`;
+    const X = unitSrc(en);
+    if (now.e1rm > before.e1rm * 1.005) text = `new best estimated max: ~${wt(X, Math.round(now.e1rm))} (${wt(X, top.w)} × ${top.reps})`;
+    else if (atWeight.length && bestReps > prevReps) text = `most reps ever at ${wt(X, en.weight)} or more: ${bestReps}`;
     if (text) prs.push({ exId: en.exId, name: en.name, text });
   }
   return prs;
@@ -271,7 +320,7 @@ function muscleWeek(ws) {
 
 function fresh() {
   return {
-    v: 3,
+    v: 4,
     setupDone: false,
     settings: { perWeek: 2, rest: 'auto', deloadAfter: 3, deloadPct: 10, progression: 'scaled', deloadEvery: 6 },
     exercises: CATALOGUE.map(fromCatalogue),
@@ -302,6 +351,10 @@ function upgrade(s) {
     const have = new Set(s.exercises.map(e => e.name.toLowerCase()));
     s.exercises.push(...CATALOGUE.filter(c => !have.has(c[1].toLowerCase())).map(c => ({ ...fromCatalogue(c), inPlan: false })));
     s.v = 3;
+  }
+  if (s.v < 4) {
+    s.exercises.forEach(e => { e.load = e.load || (DB_PAIR.has(e.name) ? 'each' : 'single'); });
+    s.v = 4;
   }
   return s;
 }
@@ -398,7 +451,8 @@ function makeEntry(e, test) {
   const amrap = test && e.amrap;
   const sets = inDeload() ? Math.max(1, Math.ceil(e.sets / 2)) : e.sets;
   return {
-    exId: e.id, name: e.name, weight: Number(e.weight) || 0, reps: e.reps, target: e.target, inc: e.inc, amrap, rest: e.rest, kind: e.kind,
+    exId: e.id, name: e.name, weight: Number(e.weight) || 0, reps: e.reps, target: e.target, inc: stepOf(e), amrap, rest: e.rest, kind: e.kind,
+    unit: unitOf(e), load: loadOf(e),
     sets: Array.from({ length: sets }, (_, i) => ({ reps: amrap && i === sets - 1 ? '' : e.reps, done: false })),
   };
 }
@@ -443,7 +497,7 @@ function finishWorkout() {
     } else {
       ex.misses = (ex.misses || 0) + 1;
       if (deloadAfter > 0 && ex.misses >= deloadAfter) {
-        const step = ex.inc || 0.5;
+        const step = stepOf(ex) || 0.5;
         const to = Math.max(0, r2(Math.floor(en.weight * (1 - deloadPct / 100) / step + 1e-9) * step));
         setWeight(ex, to, 'deload', now);
         outcomes.push({ ...base, status: 'deload', reps, to, misses: ex.misses });
@@ -459,7 +513,7 @@ function finishWorkout() {
   const session = {
     id: a.id, date: now.toISOString(), start: a.start, est: a.est, day: a.day, test: a.test,
     entries: a.entries.map(en => ({
-      exId: en.exId, name: en.name, weight: en.weight, reps: en.reps, target: en.target, inc: en.inc, amrap: en.amrap,
+      exId: en.exId, name: en.name, weight: en.weight, reps: en.reps, target: en.target, inc: en.inc, amrap: en.amrap, unit: en.unit, load: en.load,
       sets: en.sets.map(s => ({ reps: Number(s.reps) || 0, done: s.done })),
     })),
     outcomes,
@@ -521,7 +575,7 @@ function viewSetup() {
     <label class="setup-row">
       <span><b>${esc(e.name)}</b><small>${e.sets} × ${e.reps} · move up at ${e.target} reps</small></span>
       <span class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" placeholder="0"
-        data-bind="setupW" data-id="${e.id}" value="${e.weight ?? ''}"><em>${UNIT}</em></span>
+        data-bind="setupW" data-id="${e.id}" value="${e.weight ?? ''}"><em>${unitLabel(e)}</em></span>
     </label>`).join('')}
   </section>`).join('')}
   <p class="hint pad">Start with a weight you could do for two or three more reps than the set asks for.
@@ -571,7 +625,7 @@ function viewToday() {
       ? 'The last set of each exercise is AMRAP. Hit the target and the weight goes up. Tap the badge to switch.'
       : 'Straight sets at your current weights. No progression check today. Tap the badge to switch.'}</p>
     <ul class="plan">${exs.map(e => `<li><span>${esc(e.name)}</span>
-      <span class="muted">${deload ? Math.ceil(e.sets / 2) : e.sets} × ${e.reps}${test && e.amrap ? '+' : ''}</span><b>${kg(e.weight)}</b></li>`).join('')
+      <span class="muted">${deload ? Math.ceil(e.sets / 2) : e.sets} × ${e.reps}${test && e.amrap ? '+' : ''}</span><b>${wt(e, e.weight)}</b></li>`).join('')
       || '<li class="muted">Nothing picked yet. Choose exercises below.</li>'}</ul>
     <p class="hint">About <b>${Math.max(5, Math.round(estimateMin(exs, test) * (deload ? 0.6 : 1) / 5) * 5)} min</b> including warm-ups and rest${paceFactor() !== 1 ? ', adjusted to your pace' : ''}.</p>
     <button class="btn primary block" data-action="pick">Choose exercises &amp; start</button>
@@ -630,8 +684,8 @@ function pickRow(e) {
       <span class="pk"><b>${esc(e.name)}${e.kind === 'main' ? ' <span class="tag good">Recommended</span>' : ''}</b>
         <small>${e.sets} × ${e.reps}, up from ${e.target} · rest ${restFor(e) ? mmss(restFor(e)) : 'off'}${e.alt ? ` · alt. to ${esc(e.alt)}` : ''}${last ? ` · last ${dShort(last)}` : ''}</small></span>
       ${e.weight == null
-        ? `<span class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" placeholder="kg" data-bind="pickW" data-id="${e.id}" aria-label="Starting weight"></span>`
-        : `<span class="muted pkw">${kg(e.weight)}</span>`}
+        ? `<span class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" placeholder="${unitOf(e)}" data-bind="pickW" data-id="${e.id}" aria-label="Starting weight"></span>`
+        : `<span class="muted pkw">${wt(e, e.weight)}</span>`}
     </label>`;
 }
 
@@ -654,9 +708,9 @@ function updatePicker() {
 
 function goalHtml(en) {
   if (state.settings.progression === 'fixed') {
-    return `Last set: as many reps as you can. <b>${en.target}+</b> moves you to <b>${kg(r2(en.weight + en.inc))}</b>.`;
+    return `Last set: as many reps as you can. <b>${en.target}+</b> moves you to <b>${wt(en, r2(en.weight + en.inc))}</b>.`;
   }
-  return `Last set: as many reps as you can. ${en.reps}–${en.target - 1} holds, under ${en.reps} goes lighter.<br>Move up: ${ladder(en)} ${UNIT}`;
+  return `Last set: as many reps as you can. ${en.reps}–${en.target - 1} holds, under ${en.reps} goes lighter.<br>Move up: ${ladder(en)} ${unitLabel(en)}`;
 }
 
 function entryCard(en, i) {
@@ -666,9 +720,9 @@ function entryCard(en, i) {
   if (en.amrap && last.done && !isNaN(amrapReps)) {
     const next = progression(en, amrapReps);
     result = {
-      up: `<p class="result"><span class="ic good">${ICON.up}</span>${amrapReps} reps. +${fmt(r2(next.to - en.weight))} ${UNIT}, ${kg(next.to)} next time.</p>`,
-      hold: `<p class="result"><span class="ic">${ICON.hold}</span>${amrapReps} of ${en.target} reps. Staying at ${kg(en.weight)}.</p>`,
-      down: `<p class="result"><span class="ic warn">${ICON.down}</span>${amrapReps} reps, under ${en.reps}. ${kg(next.to)} next time.</p>`,
+      up: `<p class="result"><span class="ic good">${ICON.up}</span>${amrapReps} reps. +${wt(en, r2(next.to - en.weight))}, ${wt(en, next.to)} next time.</p>`,
+      hold: `<p class="result"><span class="ic">${ICON.hold}</span>${amrapReps} of ${en.target} reps. Staying at ${wt(en, en.weight)}.</p>`,
+      down: `<p class="result"><span class="ic warn">${ICON.down}</span>${amrapReps} reps, under ${en.reps}. ${wt(en, next.to)} next time.</p>`,
     }[next.status];
   }
   const a = state.active;
@@ -680,11 +734,16 @@ function entryCard(en, i) {
     ${ssFirst ? '<span class="ss-tag">Superset · no rest until the next exercise</span>' : ''}
     <div class="ex-top">
       <h3>${esc(en.name)}</h3>
-      <label class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" value="${en.weight}"
-        data-bind="enW" data-e="${i}" aria-label="Weight for ${esc(en.name)}"><em>${UNIT}</em></label>
+      <input class="wt-box" type="number" inputmode="decimal" step="0.5" min="0" value="${en.weight}"
+        data-bind="enW" data-e="${i}" aria-label="Weight for ${esc(en.name)}">
+      <span class="toggles">
+        <button class="unit-t" data-action="exUnit" data-id="${en.exId}" aria-label="Switch between kilograms and pounds">${unitOf(en)}</button>
+        ${loadOf(en) !== 'single' ? `<button class="unit-t" data-action="exLoad" data-id="${en.exId}" aria-label="Switch between per dumbbell and total">${loadOf(en) === 'each' ? 'each' : 'total'}</button>` : ''}
+      </span>
       <button class="more" data-action="entryMenu" data-e="${i}" aria-label="Exercise options">${ICON.more}</button>
     </div>
-    ${prev ? `<p class="last">Last time (${dShort(prev.date)}): ${kg(prev.en.weight)} × ${prev.en.sets.filter(s => s.done).map(s => s.reps).join(' · ')}</p>` : ''}
+    ${unitOf(en) === 'lb' ? `<p class="last" id="conv-${i}">${convHtml(en)}</p>` : ''}
+    ${prev ? `<p class="last">Last time (${dShort(prev.date)}): ${wt(en, prev.en.weight)} × ${prev.en.sets.filter(s => s.done).map(s => s.reps).join(' · ')}</p>` : ''}
     ${note ? `<p class="note">${esc(note)}</p>` : ''}
     ${en.amrap ? `<p class="goal" id="goal-${i}">${goalHtml(en)}</p>` : ''}
     <div class="sets">${en.sets.map((s, j) => {
@@ -700,6 +759,8 @@ function entryCard(en, i) {
   </section>`;
 }
 
+const convHtml = en => `${wt(en, en.weight)} = <b>${fmt(Math.round(toKg(en, en.weight) * 10) / 10)} kg</b>`;
+
 function entryMenuHtml(i) {
   const a = state.active, en = a.entries[i], ex = byId(en.exId);
   return `
@@ -710,6 +771,8 @@ function entryMenuHtml(i) {
     <button data-action="entrySuperset" data-e="${i}" ${i === a.entries.length - 1 ? 'disabled' : ''}>${en.ss ? 'Unlink superset' : `Superset with ${esc(a.entries[i + 1]?.name || 'next exercise')}`}</button>
     <button data-action="entrySet" data-e="${i}" data-dir="1">Add a set</button>
     <button data-action="entrySet" data-e="${i}" data-dir="-1" ${en.sets.length <= 1 ? 'disabled' : ''}>Remove last set</button>
+    ${ex ? `<button data-action="exUnit" data-id="${ex.id}">Switch to ${unitOf(ex) === 'lb' ? 'kilograms (kg)' : 'pounds (lb)'} for this exercise</button>` : ''}
+    ${ex && loadOf(ex) !== 'single' ? `<button data-action="exLoad" data-id="${ex.id}">Log ${loadOf(ex) === 'each' ? 'total of both dumbbells' : 'weight per dumbbell'}</button>` : ''}
     <button data-action="entryRemove" data-e="${i}" class="danger-text">Remove from today</button>
   </div>
   ${ex ? `<label class="field full" style="margin-top:16px">Note (seat height, grip, cues…)
@@ -726,19 +789,19 @@ function addToWorkoutHtml() {
   ${order.map(d => {
     const list = state.exercises.filter(e => e.day === d && !inSession.has(e.id));
     return list.length ? `<h3 class="pick-h">${DAY_LABEL[d]}</h3>${list.map(e => `
-      <div class="add-row"><span><b>${esc(e.name)}</b><small>${e.sets} × ${e.reps}${e.weight != null ? ` · ${kg(e.weight)}` : ''}</small></span>
-      ${e.weight == null ? `<span class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" placeholder="kg" data-bind="pickW" data-id="${e.id}" aria-label="Starting weight"></span>` : ''}
+      <div class="add-row"><span><b>${esc(e.name)}</b><small>${e.sets} × ${e.reps}${e.weight != null ? ` · ${wt(e, e.weight)}` : ''}</small></span>
+      ${e.weight == null ? `<span class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" placeholder="${unitOf(e)}" data-bind="pickW" data-id="${e.id}" aria-label="Starting weight"></span>` : ''}
       <button class="btn small" data-action="addEntry" data-id="${e.id}">Add</button></div>`).join('')}` : '';
   }).join('')}`;
 }
 
 function outcomeLi(o) {
-  const n = state.settings.deloadAfter;
+  const n = state.settings.deloadAfter, X = unitSrc(o);
   const rows = {
-    up: ['good', ICON.up, `${o.reps} reps (target ${o.target}). +${fmt(r2(o.to - o.from))} ${UNIT}, next time ${kg(o.to)}.`, '<span class="tag good">Up</span>'],
-    down: ['warn', ICON.down, `${o.reps} reps, under the ${o.prescribed ?? ''} prescribed. Lighter next time: ${kg(o.to)}.`, '<span class="tag warn">Lighter</span>'],
-    hold: ['', ICON.hold, `${o.reps} of ${o.target} reps. Stays at ${kg(o.to)}${n ? `, miss ${o.misses} of ${n}` : ''}.`, '<span class="tag">Hold</span>'],
-    deload: ['warn', ICON.down, `${o.reps} of ${o.target} reps, ${o.misses} misses in a row. Reset to ${kg(o.to)}.`, '<span class="tag warn">Deload</span>'],
+    up: ['good', ICON.up, `${o.reps} reps (target ${o.target}). +${wt(X, r2(o.to - o.from))}, next time ${wt(X, o.to)}.`, '<span class="tag good">Up</span>'],
+    down: ['warn', ICON.down, `${o.reps} reps, under the ${o.prescribed ?? ''} prescribed. Lighter next time: ${wt(X, o.to)}.`, '<span class="tag warn">Lighter</span>'],
+    hold: ['', ICON.hold, `${o.reps} of ${o.target} reps. Stays at ${wt(X, o.to)}${n ? `, miss ${o.misses} of ${n}` : ''}.`, '<span class="tag">Hold</span>'],
+    deload: ['warn', ICON.down, `${o.reps} of ${o.target} reps, ${o.misses} misses in a row. Reset to ${wt(X, o.to)}.`, '<span class="tag warn">Deload</span>'],
     skipped: ['', ICON.skip, 'AMRAP set not logged. Weight unchanged.', '<span class="tag">Skipped</span>'],
   }[o.status];
   return `<li><span class="ic ${rows[0]}">${rows[1]}</span><div><b>${esc(o.name)}</b><small>${rows[2]}</small></div>${rows[3]}</li>`;
@@ -786,7 +849,7 @@ function sessionDetailHtml(s) {
   <p class="sub">${dLong(s.date)} · ${s.test ? 'AMRAP test' : 'Volume day'} · ${fmt(sessionVolume(s))} ${UNIT}</p>
   <div class="detail">${s.entries.map(en => `
     <div class="line"><div><b>${esc(en.name)}</b><small>${en.sets.filter(x => x.done).map(x => x.reps).join(' · ') || 'not done'}${en.amrap ? ' (last set AMRAP)' : ''}</small></div>
-    <span>${kg(en.weight)}</span></div>`).join('')}
+    <span>${wt(unitSrc(en), en.weight)}</span></div>`).join('')}
   </div>
   ${prsHtml(s)}
   ${s.outcomes.length ? `<ul class="outcomes">${s.outcomes.map(outcomeLi).join('')}</ul>` : ''}
@@ -801,7 +864,7 @@ function editSessionHtml(s) {
   ${s.entries.map((en, i) => `
     <div class="edit-en">
       <div class="ex-top"><b>${esc(en.name)}</b>
-        <label class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" value="${en.weight}" data-es="${i}" data-k="w" aria-label="Weight"><em>${UNIT}</em></label></div>
+        <label class="wt-in"><input type="number" inputmode="decimal" step="0.5" min="0" value="${en.weight}" data-es="${i}" data-k="w" aria-label="Weight"><em>${unitLabel(unitSrc(en))}</em></label></div>
       <div class="edit-sets">${en.sets.map((st, j) => `
         <label class="reps"><input type="number" inputmode="numeric" min="0" value="${st.done ? st.reps : ''}" data-es="${i}" data-k="r" data-s="${j}"
           aria-label="Set ${j + 1} reps"><em>${en.amrap && j === en.sets.length - 1 ? 'AMRAP' : `set ${j + 1}`}</em></label>`).join('')}</div>
@@ -830,7 +893,7 @@ function saveSession(s) {
     const base = { ...o, from: en.weight };
     const later = state.sessions.some(x => new Date(x.date).getTime() > t && x.entries.some(y => y.exId === o.exId));
     const next = last.done
-      ? progression({ weight: en.weight, reps: en.reps ?? o.prescribed ?? ex.reps, target: en.target, inc: en.inc ?? ex.inc }, last.reps)
+      ? progression({ weight: en.weight, reps: en.reps ?? o.prescribed ?? ex.reps, target: en.target, inc: stepOf(ex) }, last.reps)
       : { status: 'skipped', to: en.weight };
     if (later) { frozen++; return { ...base, status: next.status, reps: last.reps, to: next.to }; }
     while (ex.log.length > 1 && ex.log[ex.log.length - 1].d === s.date) ex.log.pop();
@@ -856,7 +919,7 @@ function viewProgram() {
   <section class="card">
     <ul class="exlist">${exs.map((e, i) => `<li>
       <button class="open" data-action="editEx" data-id="${e.id}"><b>${esc(e.name)}${e.inPlan ? ' <span class="tag">In plan</span>' : ''}</b>
-        <small>${e.weight == null ? 'No weight yet' : kg(e.weight)} · ${e.sets} × ${e.reps} · ${e.amrap ? `up from ${e.target} reps` : 'no AMRAP'} · rest ${mmss(e.rest || 120)}</small></button>
+        <small>${e.weight == null ? 'No weight yet' : wt(e, e.weight)} · ${e.sets} × ${e.reps} · ${e.amrap ? `up from ${e.target} reps` : 'no AMRAP'} · rest ${mmss(e.rest || 120)}</small></button>
       <button class="mv" data-action="move" data-id="${e.id}" data-dir="-1" ${i === 0 ? 'disabled' : ''} aria-label="Move up">${ICON.mvUp}</button>
       <button class="mv" data-action="move" data-id="${e.id}" data-dir="1" ${i === exs.length - 1 ? 'disabled' : ''} aria-label="Move down">${ICON.mvDown}</button>
     </li>`).join('') || '<li><p class="empty">No exercises on this day.</p></li>'}</ul>
@@ -926,12 +989,15 @@ function editExHtml(e) {
   <div class="form">
     <label class="field full">Name<input id="fName" value="${esc(e.name)}" autocomplete="off"></label>
     <label class="field">Day<select id="fDay">${DAYS.map(d => `<option value="${d}" ${d === e.day ? 'selected' : ''}>${DAY_LABEL[d]}</option>`).join('')}</select></label>
-    <label class="field">Current weight (${UNIT})<input id="fWeight" type="number" inputmode="decimal" step="0.5" min="0" value="${e.weight ?? ''}"></label>
+    <label class="field">Units<select id="fUnit">${['kg', 'lb'].map(u => `<option value="${u}" ${unitOf(e) === u ? 'selected' : ''}>${u === 'kg' ? 'Kilograms (kg)' : 'Pounds (lb)'}</option>`).join('')}</select></label>
+    <label class="field">Weight logged as<select id="fLoad">${[['single', 'One weight'], ['each', 'Per dumbbell'], ['total', 'Both dumbbells total']].map(([v, l]) => `<option value="${v}" ${loadOf(e) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+    <p class="hint full" style="margin:0">Changing units or per dumbbell/total converts this exercise's history too. Increases are per dumbbell, so logging totals doubles each jump.</p>
+    <label class="field">Current weight (${unitLabel(e)})<input id="fWeight" type="number" inputmode="decimal" step="0.5" min="0" value="${e.weight ?? ''}"></label>
     <label class="field">Sets<input id="fSets" type="number" inputmode="numeric" min="1" max="10" value="${e.sets}"></label>
     <label class="field">Reps per set<input id="fReps" type="number" inputmode="numeric" min="1" value="${e.reps}"></label>
     <label class="toggle"><span>AMRAP last set on test days<small>Turn off for exercises you don't want to progress automatically.</small></span><input id="fAmrap" type="checkbox" ${e.amrap ? 'checked' : ''}></label>
     <label class="field">Move up at (reps)<input id="fTarget" type="number" inputmode="numeric" min="1" value="${e.target}"></label>
-    <label class="field">Increase by (${UNIT})<input id="fInc" type="number" inputmode="decimal" step="0.25" min="0" value="${e.inc}"></label>
+    <label class="field">Increase by (${unitOf(e)}${loadOf(e) === 'single' ? '' : ' per dumbbell'})<input id="fInc" type="number" inputmode="decimal" step="0.25" min="0" value="${e.inc}"></label>
     <label class="field">Rest between sets<select id="fRest">${[60, 90, 120, 150, 180, 240].map(v => `<option value="${v}" ${v === (e.rest || 120) ? 'selected' : ''}>${mmss(v)}</option>`).join('')}</select></label>
     <label class="toggle"><span>In plan<small>Ticked by default when you start a ${DAY_LABEL[e.day]} session.</small></span><input id="fPlan" type="checkbox" ${e.inPlan ? 'checked' : ''}></label>
     ${MUSCLE_MAP[e.name] && !e.muscles ? '' : `<label class="field full">Main muscle (for the body map)<select id="fMuscle">
@@ -1006,8 +1072,8 @@ function viewProgress() {
     <select class="pick" data-bind="pickEx" aria-label="Exercise">${DAYS.map(d => `<optgroup label="${DAY_LABEL[d]}">${
       tracked.filter(e => e.day === d).map(e => `<option value="${e.id}" ${e.id === ex.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}</optgroup>`).join('')}</select>
   </div>
-  <div class="headline"><b>${kg(ex.weight)}</b>
-    <span>${change === null ? 'current working weight' : `from ${kg(start)}${change ? `, <span class="up-txt">${change > 0 ? '+' : ''}${change}%</span>` : ''}`}</span></div>
+  <div class="headline"><b>${wt(ex, ex.weight)}</b>
+    <span>${unitOf(ex) === 'lb' ? `(${fmt(Math.round(toKg(ex, ex.weight) * 10) / 10)} kg) ` : ''}${change === null ? 'current working weight' : `from ${wt(ex, start)}${change ? `, <span class="up-txt">${change > 0 ? '+' : ''}${change}%</span>` : ''}`}</span></div>
 
   <section class="card chart-card"><h3>Working weight</h3><p class="sub">Steps up each time you hit the AMRAP target</p><div class="chart" id="cWeight"></div></section>
   <section class="card chart-card"><h3>AMRAP reps</h3><p class="sub">Last-set reps on test days against the target</p><div class="chart" id="cAmrap"></div>
@@ -1021,7 +1087,7 @@ function viewProgress() {
     ${tracked.map(e => {
       const s0 = e.log[0].w;
       const diff = r2((e.weight || 0) - (s0 || 0));
-      return `<tr class="${e.id === ex.id ? 'sel' : ''}" data-action="pickExRow" data-id="${e.id}"><td><span class="dot ${e.day}"></span>${esc(e.name)}</td>
+      return `<tr class="${e.id === ex.id ? 'sel' : ''}" data-action="pickExRow" data-id="${e.id}"><td><span class="dot ${e.day}"></span>${esc(e.name)}${unitOf(e) === 'lb' ? ' <small class="muted">lb</small>' : ''}</td>
         <td>${fmt(s0 || 0)}</td><td>${fmt(e.weight || 0)}</td><td class="${diff > 0 ? 'up-txt' : 'muted'}">${diff > 0 ? '+' : ''}${fmt(diff)}</td></tr>`;
     }).join('')}
     </tbody></table></section>
@@ -1038,8 +1104,8 @@ function recordsCard() {
   if (!rows.length) return '';
   return `<section class="card"><h3>Records</h3>
     <table class="lifts"><thead><tr><th>Exercise</th><th>Heaviest</th><th>Est. max</th>${bw ? '<th>× body</th>' : ''}</tr></thead><tbody>
-    ${rows.map(({ e, b }) => `<tr><td><span class="dot ${e.day}"></span>${esc(e.name)}</td><td>${fmt(b.heavy)} × ${b.heavyReps}</td>
-      <td>${fmt(Math.round(b.e1rm))}</td>${bw ? `<td>${e.kind === 'main' ? `${(b.e1rm / bw).toFixed(2)}×` : '–'}</td>` : ''}</tr>`).join('')}
+    ${rows.map(({ e, b }) => `<tr><td><span class="dot ${e.day}"></span>${esc(e.name)}${unitOf(e) === 'lb' ? ' <small class="muted">lb</small>' : ''}</td><td>${fmt(b.heavy)} × ${b.heavyReps}</td>
+      <td>${fmt(Math.round(b.e1rm))}</td>${bw ? `<td>${e.kind === 'main' ? `${(toKg(e, b.e1rm) / bw).toFixed(2)}×` : '–'}</td>` : ''}</tr>`).join('')}
     </tbody></table>
     ${bw ? '<p class="hint">× body is estimated max divided by your latest bodyweight, shown for squat, deadlift and bench.</p>' : ''}</section>`;
 }
@@ -1055,44 +1121,54 @@ function bodyCard() {
       <button class="btn small" data-action="logBW">${loggedToday ? 'Update today' : 'Log weight'}</button></div></section>`;
 }
 
-// Front and back figure. Shading: none, hit in one session, hit in two or more sessions (primary muscle).
-const BODY_SHAPES = [
-  // front
-  ['', '<circle cx="80" cy="20" r="13"/><rect x="74" y="32" width="12" height="9"/>'],
-  ['sideDelts', '<ellipse cx="50" cy="58" rx="6" ry="11"/><ellipse cx="110" cy="58" rx="6" ry="11"/>'],
-  ['frontDelts', '<ellipse cx="59" cy="53" rx="9" ry="9"/><ellipse cx="101" cy="53" rx="9" ry="9"/>'],
-  ['chest', '<rect x="61" y="46" width="18" height="26" rx="6"/><rect x="81" y="46" width="18" height="26" rx="6"/>'],
-  ['biceps', '<rect x="41" y="70" width="11" height="28" rx="5"/><rect x="108" y="70" width="11" height="28" rx="5"/>'],
-  ['', '<rect x="37" y="101" width="11" height="32" rx="5"/><rect x="112" y="101" width="11" height="32" rx="5"/><rect x="64" y="75" width="32" height="44" rx="6"/>'],
-  ['quads', '<rect x="57" y="122" width="15" height="64" rx="7"/><rect x="88" y="122" width="15" height="64" rx="7"/>'],
-  ['adductors', '<rect x="73" y="124" width="6" height="46" rx="3"/><rect x="81" y="124" width="6" height="46" rx="3"/>'],
-  ['', '<rect x="58" y="189" width="14" height="8" rx="4"/><rect x="88" y="189" width="14" height="8" rx="4"/><rect x="59" y="200" width="12" height="44" rx="5"/><rect x="89" y="200" width="12" height="44" rx="5"/>'],
-  // back
-  ['', '<circle cx="240" cy="20" r="13"/><rect x="234" y="32" width="12" height="9"/>'],
-  ['upperBack', '<path d="M240 38 L218 52 L226 66 L240 90 L254 66 L262 52 Z"/>'],
-  ['sideDelts', '<ellipse cx="210" cy="58" rx="6" ry="11"/><ellipse cx="270" cy="58" rx="6" ry="11"/>'],
-  ['rearDelts', '<ellipse cx="219" cy="54" rx="9" ry="9"/><ellipse cx="261" cy="54" rx="9" ry="9"/>'],
-  ['triceps', '<rect x="201" y="70" width="11" height="28" rx="5"/><rect x="268" y="70" width="11" height="28" rx="5"/>'],
-  ['', '<rect x="197" y="101" width="11" height="32" rx="5"/><rect x="272" y="101" width="11" height="32" rx="5"/>'],
-  ['lats', '<path d="M222 64 L236 92 L236 112 L226 110 L216 80 Z"/><path d="M258 64 L244 92 L244 112 L254 110 L264 80 Z"/>'],
-  ['lowerBack', '<rect x="230" y="94" width="20" height="24" rx="5"/>'],
-  ['abductors', '<ellipse cx="221" cy="123" rx="7" ry="7"/><ellipse cx="259" cy="123" rx="7" ry="7"/>'],
-  ['glutes', '<rect x="223" y="122" width="16" height="28" rx="8"/><rect x="241" y="122" width="16" height="28" rx="8"/>'],
-  ['hamstrings', '<rect x="221" y="153" width="16" height="38" rx="7"/><rect x="243" y="153" width="16" height="38" rx="7"/>'],
-  ['', '<rect x="222" y="192" width="14" height="6" rx="3"/><rect x="244" y="192" width="14" height="6" rx="3"/>'],
-  ['calves', '<rect x="222" y="200" width="14" height="40" rx="6"/><rect x="244" y="200" width="14" height="40" rx="6"/>'],
+// Front and back figure, drawn as the left half around x = 80 and mirrored. Shading: none, hit in one session,
+// hit in two or more sessions (as a primary muscle). '' entries are anatomy detail that never shades.
+const SILHOUETTE = 'M80 33 L74.5 33 C74.5 37 74.5 40 73 42 C66 45 58 46 52 49 C44 52 41 60 41 70 C39 82 38 92 37 104 '
+  + 'C35 116 34 126 35 138 C35 146 37 151 40 151 C43 150 43 145 43 139 C44 127 46 116 47 106 C48 96 50 86 53 77 '
+  + 'C55 88 57 100 58 112 C56 120 55 128 56 136 C56 160 58 180 61 199 C58 212 59 226 62 240 C60 250 63 255 71 255 '
+  + 'C74 254 74 250 73 246 C74 232 75 216 74 202 C75 184 77 160 79 140 L80 139 Z';
+const BODY_FRONT = [
+  ['sideDelts', 'M51 49 C44 51 41 58 41 69 L44 71 C44 62 46 55 52 51 Z'],
+  ['frontDelts', 'M52 51 C47 55 44.5 62 44.5 71 C49 69 53 66 57 62 C58 57 56 53 52 51 Z'],
+  ['chest', 'M78.6 49 C70 47.5 62 49.5 58 54 C56.5 60 56.5 66 58.5 72 C64 77 72 78.5 78.6 76 Z'],
+  ['biceps', 'M45.5 74 C43.5 82 42.5 92 43.5 100 C46 102 48 100.5 49 98 C50.5 90 51.5 82 52.5 76 C50.5 74 48 73 45.5 74 Z'],
+  ['', 'M72 80 C70.5 92 70.5 104 72.5 116 C75 119 77 120 78.6 120 L78.6 80 Z'],
+  ['quads', 'M59 139 C57 153 58 171 62 189 C65 196 70 197 73 192 C75 176 76 158 75.5 143 C70 139 64 137 59 139 Z'],
+  ['adductors', 'M76.5 141 C77.5 152 76.5 166 74.5 180 C77 176 78.5 167 79.2 156 L79.2 141 Z'],
+  ['', 'M62 204 C60.5 214 61 226 63 236 C66 236 69 234 70 230 C71.5 222 72 212 71.5 204 C68 202 65 202 62 204 Z'],
 ];
+const BODY_BACK = [
+  ['upperBack', 'M80 36 C76 40 70 44 60 47 C55 48 53 50 54 53 C62 54 70 60 75 72 C77 80 79 88 80 93 Z'],
+  ['sideDelts', 'M51 49 C44 51 41 58 41 69 L44 71 C44 62 46 55 52 51 Z'],
+  ['rearDelts', 'M53 50 C47 52 44 58 44.5 66 C48.5 64 53 60 57 57 C57 53 56 51 53 50 Z'],
+  ['triceps', 'M44.5 73 C42.5 82 42.5 92 43.5 100 C46 102 49 101 50 98 C51 90 52 82 52.5 76 C50 73.5 47 72.5 44.5 73 Z'],
+  ['lats', 'M57 60 C62 66 68 76 73 90 C75 100 76 108 76 114 C70 112 65 108 61 100 C58 90 56 76 57 60 Z'],
+  ['lowerBack', 'M74.5 96 C73.5 104 73.5 112 74.5 120 L79.2 122 L79.2 96 Z'],
+  ['abductors', 'M59 118 C56 122 56 128 59 132 C64 130 68 126 70 120 C66 117 62 116 59 118 Z'],
+  ['glutes', 'M61 127 C58 137 60 149 68 153.5 C74 155 78 152 79.2 148 L79.2 126 C73 124 66 124 61 127 Z'],
+  ['hamstrings', 'M60 156 C59 170 61 184 64 194 C68 198 73 197 75 192 C77 178 78 166 78 156 C72 158 66 158 60 156 Z'],
+  ['calves', 'M61 204 C58 214 59 224 63 232 C67 234 71 232 72 226 C74 218 74 210 72 202 C68 200 64 200 61 204 Z'],
+];
+
+const mirrored = d => `<path d="${d}"/><path d="${d}" transform="translate(160 0) scale(-1 1)"/>`;
+
+function figure(shapes, x, lvl) {
+  return `<g transform="translate(${x} 0)">
+    <g class="sil"><ellipse cx="80" cy="20" rx="11" ry="14"/>${mirrored(SILHOUETTE)}</g>
+    ${shapes.map(([m, d]) => m
+      ? `<g class="bm h${lvl(m)}" data-action="muscle" data-m="${m}"><title>${MUSCLES[m]}</title>${mirrored(d)}</g>`
+      : `<g class="bm-detail">${mirrored(d)}</g>`).join('')}
+  </g>`;
+}
 
 function muscleCard() {
   const ws = weekStart(new Date());
   if (ui.mWeek) ws.setDate(ws.getDate() - 7);
   const data = muscleWeek(ws);
   const lvl = m => Math.min(2, data[m].sessions.size);
-  const svg = `<svg class="bodymap" viewBox="0 0 320 262" role="img" aria-label="Muscles trained this week">
-    ${BODY_SHAPES.map(([m, shape]) => m
-      ? `<g class="bm h${lvl(m)}" data-action="muscle" data-m="${m}"><title>${MUSCLES[m]}</title>${shape}</g>`
-      : `<g class="bm-base">${shape}</g>`).join('')}
-    <text x="80" y="258" text-anchor="middle" class="ax">Front</text><text x="240" y="258" text-anchor="middle" class="ax">Back</text></svg>`;
+  const svg = `<svg class="bodymap" viewBox="0 0 320 272" role="img" aria-label="Muscles trained this week">
+    ${figure(BODY_FRONT, 0, lvl)}${figure(BODY_BACK, 160, lvl)}
+    <text x="80" y="270" text-anchor="middle">Front</text><text x="240" y="270" text-anchor="middle">Back</text></svg>`;
   const rows = Object.keys(MUSCLES).map(m => {
     const sets = data[m].sets;
     return `<tr data-action="muscle" data-m="${m}"><td>${MUSCLES[m]}</td><td>${data[m].sessions.size || '–'}</td><td>${sets ? fmt(r2(sets)) : '–'}</td>
@@ -1124,16 +1200,16 @@ function drawCharts() {
 
   lineChart($('#cWeight'), {
     pts: weight, step: true, color, label: `${ex.name} working weight`,
-    tip: p => `<b>${kg(p.y)}</b><br>${why[p.why] || ''} · ${dShort(p.x)}`,
+    tip: p => `<b>${wt(ex, p.y)}</b><br>${why[p.why] || ''} · ${dShort(p.x)}`,
   });
   barChart($('#cAmrap'), {
     bars: amrap.map(p => ({ ...p, color: p.y >= p.target ? color : 'var(--muted)', dim: p.y < p.target })),
     ref: ex.target, label: `${ex.name} AMRAP reps`,
-    tip: p => `<b>${p.y} reps</b> @ ${kg(p.w)}<br>${p.y >= p.target ? 'Hit' : 'Missed'} target ${p.target} · ${dShort(p.x)}`,
+    tip: p => `<b>${p.y} reps</b> @ ${wt(ex, p.w)}<br>${p.y >= p.target ? 'Hit' : 'Missed'} target ${p.target} · ${dShort(p.x)}`,
   });
   lineChart($('#cE1rm'), {
     pts: e1rm, color, label: `${ex.name} estimated one-rep max`,
-    tip: p => `<b>~${kg(Math.round(p.y))}</b><br>${dShort(p.x)}`,
+    tip: p => `<b>~${wt(ex, Math.round(p.y))}</b><br>${dShort(p.x)}`,
   });
   stackChart($('#cVol'), weeklyVolume());
 }
@@ -1597,8 +1673,24 @@ const actions = {
         e.weight = w; e.log[0].w = w;
       } else setWeight(e, w, 'edit');
     }
+    const unit = $('#fUnit').value, load = $('#fLoad').value;
+    const converted = unit !== unitOf(e) || load !== loadOf(e);
+    if (converted) convertExercise(e, { unit, load });
     ui.progDay = e.day;
-    save(); closeSheet(); render(); toast('Saved');
+    save(); closeSheet(); render();
+    toast(converted ? `Saved. Now ${wt(e, e.weight)}, history converted.` : 'Saved');
+  },
+  exUnit: b => {
+    const e = byId(b.dataset.id);
+    convertExercise(e, { unit: unitOf(e) === 'lb' ? 'kg' : 'lb' });
+    save(); closeSheet(); render();
+    toast(`${e.name} now in ${unitOf(e)}: ${wt(e, e.weight)}`);
+  },
+  exLoad: b => {
+    const e = byId(b.dataset.id);
+    convertExercise(e, { load: loadOf(e) === 'each' ? 'total' : 'each' });
+    save(); closeSheet(); render();
+    toast(`${e.name}: ${wt(e, e.weight)}`);
   },
   deleteEx: b => {
     const e = byId(b.dataset.id);
@@ -1641,6 +1733,8 @@ document.addEventListener('input', e => {
     en.weight = Number(t.value) || 0;
     const g = $(`#goal-${t.dataset.e}`);
     if (g) g.innerHTML = goalHtml(en);
+    const cv = $(`#conv-${t.dataset.e}`);
+    if (cv) cv.innerHTML = convHtml(en);
     save();
   } else if (bind === 'setR') {
     state.active.entries[t.dataset.e].sets[t.dataset.s].reps = t.value === '' ? '' : Number(t.value);

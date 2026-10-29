@@ -21,6 +21,11 @@ A push / pull / legs workout tracker built around AMRAP-based progressive overlo
 - **Time estimate:** warm-ups, about 3 seconds a rep, set-up and every rest. After two sessions it adjusts to how long yours actually take.
 - You can rename, add, remove and reorder exercises, and change every number, in the **Program** tab.
 
+## Dumbbells and pounds
+
+- **Dumbbell exercises** log the weight per dumbbell by default ("22 kg each"). Switch an exercise to **Both dumbbells total** ("44 kg total") in Program → the exercise, or from its ⋯ menu during a workout. The increase is set per dumbbell, so on totals each jump doubles (2 kg per hand = +4 kg total). Switching converts that exercise's history.
+- **Machines in pounds:** set an exercise's units to **Pounds (lb)**. You then enter and progress it in lb (for example 10 lb jumps on a stack), and the workout shows the kg equivalent ("110 lb = 49.9 kg"). Volume and bodyweight ratios are always worked out in kg.
+
 ## During and after a workout
 
 - **Pre-filled:** each exercise opens with its current weight and prescribed reps already filled in, so normal sets are just a tick. Under the name you see **last time's numbers** (for example "Last time (Oct 21): 60 kg × 8 · 8 · 13") and any **note** you've saved for it.
