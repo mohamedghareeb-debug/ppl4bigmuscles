@@ -56,17 +56,11 @@ A push / pull / legs workout tracker built around AMRAP-based progressive overlo
 
 The app has to be served over HTTPS. Two free options:
 
-1. **Netlify Drop** (easiest, no git): go to https://app.netlify.com/drop and drag the `ppl-tracker` folder onto the page. You get a URL like `https://something.netlify.app`.
-2. **GitHub Pages:** push this folder to a GitHub repo, then turn on Pages under Settings → Pages.
-
-Then on the iPhone, open the URL in **Safari**, tap **Share → Add to Home Screen**, and from then on launch it from the icon.
 
 Notes:
 - The home-screen app keeps its data separately from Safari. Always use the icon.
 - Use **Program → Export backup** now and then (save it to Files or iCloud Drive). If you delete the app or change phones, restore it with **Import backup**.
 - After you change the code and redeploy, bump `VERSION` in `sw.js` so phones pick up the update. It takes effect the next time you open the app.
-
-## Testing on this PC
 
 ```
 powershell -ExecutionPolicy Bypass -File tools\serve.ps1
